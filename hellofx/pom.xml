@@ -11,6 +11,14 @@
         <!-- Use a modern JavaFX version compatible with JDK 24 and macOS ARM64 -->
         <javafx.version>23.0.1</javafx.version>
     </properties>
+    <repositories>
+        <repository>
+            <id>be.0110.repo-releases</id>
+            <name>0110.be repository</name>
+            <url>https://mvn.0110.be/releases</url>
+        </repository>
+    </repositories>
+
     <dependencies>
         <dependency>
             <groupId>org.openjfx</groupId>
@@ -27,6 +35,17 @@
             <groupId>org.openjfx</groupId>
             <artifactId>javafx-graphics</artifactId>
             <version>${javafx.version}</version>
+        </dependency>
+        <!-- TarsosDSP for real-time pitch detection (via JitPack) -->
+        <dependency>
+            <groupId>be.tarsos.dsp</groupId>
+            <artifactId>core</artifactId>
+            <version>2.5</version>
+        </dependency>
+        <dependency>
+            <groupId>be.tarsos.dsp</groupId>
+            <artifactId>jvm</artifactId>
+            <version>2.5</version>
         </dependency>
     </dependencies>
     <build>
@@ -49,8 +68,8 @@
                         <!-- Usage: mvn clean javafx:run -->
                         <id>default-cli</id>
                         <configuration>
-                            <!-- For modular projects, use the module-qualified main class -->
-                            <mainClass>org.openjfx/org.openjfx.App</mainClass>
+                            <!-- Non-modular app main class -->
+                            <mainClass>org.openjfx.App</mainClass>
                             <launcher>hellofx</launcher>
                             <stripDebug>true</stripDebug>
                         </configuration>
