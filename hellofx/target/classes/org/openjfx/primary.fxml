@@ -4,6 +4,7 @@
 <?import javafx.scene.control.*?>
 <?import javafx.scene.layout.*?>
 <?import javafx.scene.text.*?>
+<?import javafx.scene.canvas.Canvas?>
 
 <VBox alignment="CENTER" spacing="16.0" xmlns="http://javafx.com/javafx" xmlns:fx="http://javafx.com/fxml/1" fx:controller="org.openjfx.PrimaryController">
   <children>
@@ -28,6 +29,35 @@
       </children>
     </HBox>
 
+    <HBox spacing="8.0">
+      <children>
+        <Label text="A4 (Hz):" />
+        <TextField fx:id="a4Field" prefWidth="80.0" promptText="440.0" />
+        <Button text="Set" onAction="#onSetA4" />
+        <Button fx:id="calibrateButton" text="Calibrate" onAction="#onCalibrate" />
+        <Label fx:id="tuningLabel" text="Tuning: 0.0c" />
+      </children>
+    </HBox>
+
+    <Separator />
+
+    <VBox spacing="6.0">
+      <children>
+        <Label text="Tuner" />
+        <HBox spacing="8.0" alignment="CENTER_LEFT">
+          <children>
+            <Label text="String:" />
+            <ComboBox fx:id="tunerModeBox" prefWidth="120.0" />
+            <Label text="Target:" />
+            <Label fx:id="tunerTargetLabel" text="--" />
+            <Label text="Cents:" />
+            <Label fx:id="tunerCentsLabel" text="--" />
+          </children>
+        </HBox>
+        <Canvas fx:id="tunerCanvas" width="640.0" height="60.0" />
+      </children>
+    </VBox>
+
     <VBox spacing="6.0">
       <children>
         <Label text="Detected Note:" />
@@ -43,6 +73,35 @@
       <children>
         <Label fx:id="freqLabel" text="Freq: -- Hz" />
         <Label fx:id="confLabel" text="Confidence: --" />
+      </children>
+    </HBox>
+
+    <Separator />
+
+    <VBox spacing="6.0">
+      <children>
+        <Label text="Spectral Peaks" />
+        <Canvas fx:id="spectrumCanvas" width="640.0" height="200.0" />
+      </children>
+    </VBox>
+
+    <Separator />
+
+    <VBox spacing="6.0">
+      <children>
+        <Label text="Polyphonic Notes:" />
+        <Label fx:id="polyLabel" text="--" />
+      </children>
+    </VBox>
+
+    <HBox spacing="24.0">
+      <children>
+        <Label text="Chord:" />
+        <Label fx:id="chordLabel" text="--" />
+        <Label text="Gesture:" />
+        <Label fx:id="gestureLabel" text="--" />
+        <Label text="Harmonics:" />
+        <Label fx:id="harmonicsLabel" text="--" />
       </children>
     </HBox>
   </children>
