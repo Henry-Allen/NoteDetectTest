@@ -5,7 +5,6 @@ import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 import javafx.application.Platform;
 import javafx.collections.FXCollections;
 import javafx.collections.ObservableList;
@@ -17,6 +16,7 @@ import javafx.scene.control.ListView;
 import javafx.scene.control.TextArea;
 import javafx.scene.control.TextField;
 
+import java.awt.Desktop;
 import java.io.IOException;
 import java.net.URI;
 import java.net.URLEncoder;
@@ -24,31 +24,28 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.StandardOpenOption;
+import java.text.Normalizer;
 import java.time.Duration;
-import java.time.LocalDateTime;
-import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
-import java.util.Objects;
-import java.util.Optional;
+import java.util.Locale;
+import java.util.Map;
+import java.util.HashMap;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 
 public class TabPrototypeController {
 
     private static final String SONGSTERR_SEARCH_ENDPOINT = "https://www.songsterr.com/api/songs?pattern=";
-    private static final String SONGSTERR_SONG_ENDPOINT = "https://www.songsterr.com/a/wsa/song?id=";
-    private static final DateTimeFormatter TIMESTAMP_FORMAT = DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss");
+    private static final String SONGSTERR_VIEW_BASE = "https://www.songsterr.com/a/wsa/";
     private static final ObjectMapper MAPPER = new ObjectMapper()
             .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
     private static final HttpClient HTTP_CLIENT = HttpClient.newBuilder()
@@ -56,16 +53,25 @@ public class TabPrototypeController {
             .connectTimeout(Duration.ofSeconds(10))
             .build();
     private static final ExecutorService EXECUTOR = Executors.newFixedThreadPool(4, new SongsterrThreadFactory());
-    private static final Path TAB_DIRECTORY = Path.of("tab");
+    private static final String USER_AGENT = "NoteDetectTest/1.0 (+https://github.com)";
+    private static final String[] PART_CDN_HOSTS = {
+            "d3rrfvx08uyjp1",
+            "dodkcbujl0ebx",
+            "dj1usja78sinh"
+    };
 
     private final ObservableList<SongItem> songs = FXCollections.observableArrayList();
     private final ObservableList<TrackItem> tracks = FXCollections.observableArrayList();
+    private final Map<Integer, SongDetails> songDetailsCache = new ConcurrentHashMap<>();
+    private final Map<Integer, CompletableFuture<SongDetails>> songDetailsInFlight = new ConcurrentHashMap<>();
+
+    private CompletableFuture<SongDetails> currentSongDetailsFuture;
+    private volatile int activeSongId = -1;
 
     @FXML private TextField searchField;
     @FXML private Button searchButton;
     @FXML private ListView<SongItem> songsList;
     @FXML private ListView<TrackItem> tracksList;
-    @FXML private Button downloadButton;
     @FXML private TextArea tabDisplay;
     @FXML private Label statusLabel;
 
@@ -76,26 +82,42 @@ public class TabPrototypeController {
         songsList.getSelectionModel().selectedItemProperty().addListener((obs, oldItem, newItem) -> {
             tracks.clear();
             tabDisplay.clear();
-            downloadButton.setDisable(true);
             if (newItem != null) {
+                activeSongId = newItem.songId();
                 tracks.addAll(newItem.tracks());
-                setStatus("Select a track to inspect or download.", false);
+                setStatus("Fetching Songsterr metadata...", false);
+                currentSongDetailsFuture = getSongDetails(newItem);
+                currentSongDetailsFuture.whenComplete((details, error) -> Platform.runLater(() -> {
+                    if (songsList.getSelectionModel().getSelectedItem() != newItem) {
+                        return;
+                    }
+                    if (error != null) {
+                        Throwable cause = unwrap(error);
+                        setStatus("Failed to load song metadata: " + cause.getMessage(), true);
+                    } else if (details != null) {
+                        applySongDetailsToTracks(newItem, details);
+                        setStatus("Song metadata loaded. Select a track to scrape tab JSON.", false);
+                    }
+                }));
+            } else {
+                activeSongId = -1;
+                currentSongDetailsFuture = null;
             }
         });
 
         tracksList.setItems(tracks);
         tracksList.setCellFactory(simpleCell(TrackItem::displayLabel));
         tracksList.getSelectionModel().selectedItemProperty().addListener((obs, oldItem, newItem) -> {
-            downloadButton.setDisable(newItem == null);
             if (newItem != null) {
                 tabDisplay.setText(buildPreview(newItem));
+                openTrackInBrowser(newItem);
+                loadTrackJson(newItem);
             } else {
                 tabDisplay.clear();
             }
         });
 
         searchField.setOnAction(event -> onSearch());
-        downloadButton.setDisable(true);
         setStatus("Enter a search term to begin.", false);
     }
 
@@ -109,7 +131,6 @@ public class TabPrototypeController {
 
         final String cleanedTerm = term.trim();
         searchButton.setDisable(true);
-        downloadButton.setDisable(true);
         songs.clear();
         tracks.clear();
         tabDisplay.clear();
@@ -129,39 +150,177 @@ public class TabPrototypeController {
                         return;
                     }
                     songs.setAll(results);
-                    setStatus("Found " + results.size() + " song(s). Select one to view tracks.", false);
+                    setStatus("Found " + results.size() + " song(s). Pick one, then choose a track to view its scraped tab JSON.", false);
                 }));
     }
 
-    @FXML
-    private void onDownload() {
-        SongItem song = songsList.getSelectionModel().getSelectedItem();
-        TrackItem track = tracksList.getSelectionModel().getSelectedItem();
-        if (song == null || track == null) {
+    private void loadTrackJson(TrackItem track) {
+        if (track == null) return;
+        CompletableFuture<SongDetails> detailsFuture = currentSongDetailsFuture;
+        if (detailsFuture == null) {
+            setStatus("Song metadata is still loading. Please wait...", true);
             return;
         }
 
-        downloadButton.setDisable(true);
-        setStatus("Downloading \"" + track.name() + "\"...", false);
+        if (track.prettyTabJson() != null) {
+            tabDisplay.setText(buildPreview(track));
+            setStatus("Loaded cached tab JSON.", false);
+            return;
+        }
 
-        CompletableFuture
-                .supplyAsync(() -> downloadTrack(song, track), EXECUTOR)
-                .whenComplete((result, error) -> Platform.runLater(() -> {
-                    downloadButton.setDisable(false);
+        setStatus("Scraping tab JSON for \"" + track.name() + "\"...", false);
+
+        detailsFuture
+                .thenCompose(details -> {
+                    if (details == null || details.songId != track.songId()) {
+                        throw new IllegalStateException("Song changed while loading tab data.");
+                    }
+                    SongTrackInfo info = details.trackForHash(track.hash());
+                    if (info == null) {
+                        throw new IllegalStateException("Songsterr did not return part info for this track.");
+                    }
+                    if (track.prettyTabJson() != null) {
+                        return CompletableFuture.completedFuture(track.prettyTabJson());
+                    }
+                    return fetchTabJson(details, info).thenApply(raw -> {
+                        String pretty = prettifyJson(raw);
+                        track.setTabJson(raw, pretty);
+                        return pretty;
+                    });
+                })
+                .whenComplete((prettyJson, error) -> Platform.runLater(() -> {
+                    if (tracksList.getSelectionModel().getSelectedItem() != track) {
+                        return;
+                    }
                     if (error != null) {
                         Throwable cause = unwrap(error);
-                        setStatus("Download failed: " + cause.getMessage(), true);
-                        return;
+                        setStatus("Failed to scrape tab data: " + cause.getMessage(), true);
+                    } else if (prettyJson != null) {
+                        tabDisplay.setText(buildTabDisplay(track, prettyJson));
+                        setStatus("Loaded tab JSON from Songsterr.", false);
                     }
-                    if (result == null) {
-                        setStatus("No data returned for the selected track.", true);
-                        return;
-                    }
-                    track.setDownloadedPreview(result.preview());
-                    track.setDownloadedFile(result.file());
-                    tabDisplay.setText(result.preview());
-                    setStatus("Saved tab metadata to " + result.file().toString(), false);
                 }));
+    }
+
+    private CompletableFuture<SongDetails> getSongDetails(SongItem song) {
+        SongDetails cached = songDetailsCache.get(song.songId());
+        if (cached != null) {
+            return CompletableFuture.completedFuture(cached);
+        }
+        return songDetailsInFlight.computeIfAbsent(song.songId(), id ->
+                CompletableFuture.supplyAsync(() -> fetchSongDetails(song), EXECUTOR)
+                        .whenComplete((details, error) -> {
+                            if (error == null && details != null) {
+                                songDetailsCache.put(id, details);
+                            }
+                            songDetailsInFlight.remove(id);
+                        })
+        );
+    }
+
+    private SongDetails fetchSongDetails(SongItem song) {
+        try {
+            String url = buildSongUrl(song.artist(), song.title(), song.songId());
+            HttpRequest request = HttpRequest.newBuilder(URI.create(url))
+                    .header("User-Agent", USER_AGENT)
+                    .header("Accept", "text/html")
+                    .GET()
+                    .build();
+            HttpResponse<String> response = HTTP_CLIENT.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+            if (response.statusCode() != 200) {
+                throw new IOException("Song view returned HTTP " + response.statusCode());
+            }
+            JsonNode state = extractStateJson(response.body());
+            JsonNode meta = state.path("meta").path("current");
+            int revisionId = meta.path("revisionId").asInt(-1);
+            if (revisionId <= 0) {
+                throw new IOException("Songsterr response missing revision id.");
+            }
+            Map<String, SongTrackInfo> trackMap = new HashMap<>();
+            JsonNode tracksNode = meta.path("tracks");
+            if (tracksNode.isArray()) {
+                int index = 0;
+                for (JsonNode trackNode : tracksNode) {
+                    String hash = trackNode.path("hash").asText(null);
+                    int partId = trackNode.path("partId").asInt(-1);
+                    if (hash != null && partId >= 0) {
+                        trackMap.put(hash, new SongTrackInfo(partId, index));
+                    }
+                    index++;
+                }
+            }
+            SongDetails details = new SongDetails(song.songId(), revisionId, trackMap);
+            System.out.println("[Songsterr][details] songId=" + song.songId() + " revisionId=" + revisionId + " tracks=" + trackMap.size());
+            return details;
+        } catch (InterruptedException ex) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("Interrupted while loading song details.", ex);
+        } catch (Exception ex) {
+            throw new IllegalStateException(ex.getMessage(), ex);
+        }
+    }
+
+    private void applySongDetailsToTracks(SongItem song, SongDetails details) {
+        for (TrackItem track : song.tracks()) {
+            SongTrackInfo info = details.trackForHash(track.hash());
+            if (info != null) {
+                track.setSongMeta(info.partId, info.index);
+            }
+        }
+        if (songsList.getSelectionModel().getSelectedItem() == song) {
+            tracksList.refresh();
+            TrackItem selected = tracksList.getSelectionModel().getSelectedItem();
+            if (selected != null) {
+                tabDisplay.setText(buildPreview(selected));
+            }
+        }
+    }
+
+    private CompletableFuture<String> fetchTabJson(SongDetails details, SongTrackInfo info) {
+        List<URI> candidates = buildCandidateUris(details, info);
+        CompletableFuture<String> future = new CompletableFuture<>();
+        fetchTabCandidate(candidates, 0, future);
+        return future;
+    }
+
+    private List<URI> buildCandidateUris(SongDetails details, SongTrackInfo info) {
+        List<URI> uris = new ArrayList<>();
+        for (String host : PART_CDN_HOSTS) {
+            String url = String.format("https://%s.cloudfront.net/part/%d/%d", host, details.revisionId, info.partId);
+            uris.add(URI.create(url));
+        }
+        return uris;
+    }
+
+    private void fetchTabCandidate(List<URI> uris, int index, CompletableFuture<String> future) {
+        if (future.isDone()) return;
+        if (index >= uris.size()) {
+            future.completeExceptionally(new IOException("No Songsterr tab sources responded."));
+            return;
+        }
+        URI uri = uris.get(index);
+        HttpRequest request = HttpRequest.newBuilder(uri)
+                .header("User-Agent", USER_AGENT)
+                .header("Accept", "application/json")
+                .GET()
+                .build();
+        HTTP_CLIENT.sendAsync(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8))
+                .whenComplete((response, error) -> {
+                    if (future.isDone()) {
+                        return;
+                    }
+                    if (error != null) {
+                        System.out.println("[Songsterr][scrape] " + uri + " error=" + error.getMessage());
+                        fetchTabCandidate(uris, index + 1, future);
+                    } else if (response.statusCode() == 200) {
+                        String body = response.body();
+                        System.out.println("[Songsterr][scrape] " + uri + " status=200 bytes=" + (body != null ? body.length() : 0));
+                        future.complete(body);
+                    } else {
+                        System.out.println("[Songsterr][scrape] " + uri + " status=" + response.statusCode());
+                        fetchTabCandidate(uris, index + 1, future);
+                    }
+                });
     }
 
     @FXML
@@ -183,11 +342,13 @@ public class TabPrototypeController {
                     .build();
 
             HttpResponse<String> response = HTTP_CLIENT.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+            String body = response.body();
+            System.out.println("[Songsterr][search] term=\"" + term + "\" status=" + response.statusCode() + " body=" + body);
             if (response.statusCode() != 200) {
                 throw new IOException("Songsterr returned HTTP " + response.statusCode());
             }
 
-            JsonNode root = MAPPER.readTree(response.body());
+            JsonNode root = MAPPER.readTree(body);
             if (!root.isArray()) {
                 return Collections.emptyList();
             }
@@ -212,7 +373,8 @@ public class TabPrototypeController {
                         if (tuningNode.isArray()) {
                             tuningNode.forEach(t -> tuning.add(t.asInt()));
                         }
-                        trackItems.add(new TrackItem(songId, artist, title, name, instrument, hash, difficulty, tuning));
+                        int trackIndex = trackItems.size();
+                        trackItems.add(new TrackItem(songId, artist, title, trackIndex, name, instrument, hash, difficulty, tuning));
                     }
                 }
                 items.add(new SongItem(songId, artist, title, trackItems));
@@ -226,120 +388,74 @@ public class TabPrototypeController {
         }
     }
 
-    private DownloadResult downloadTrack(SongItem song, TrackItem track) {
-        try {
-            Files.createDirectories(TAB_DIRECTORY);
-            String html = fetchSongHtml(song.songId());
-            JsonNode state = extractStateJson(html);
-
-            JsonNode meta = state.path("meta").path("current");
-            int revisionId = meta.path("revisionId").asInt(-1);
-
-            JsonNode matchingTrack = findTrackNode(meta.path("tracks"), track.hash());
-            if (matchingTrack == null) {
-                throw new IOException("Track not present in Songsterr metadata.");
-            }
-
-            ObjectNode export = MAPPER.createObjectNode();
-            export.put("downloadedAt", LocalDateTime.now().toString());
-            export.put("songId", song.songId());
-            export.put("revisionId", revisionId);
-            export.set("song", meta);
-            export.set("track", matchingTrack);
-            export.set("part", state.path("part"));
-
-            String prettyJson = MAPPER.writerWithDefaultPrettyPrinter().writeValueAsString(export);
-            Path file = TAB_DIRECTORY.resolve(buildFilename(song, track));
-            Files.writeString(file, prettyJson, StandardCharsets.UTF_8, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
-
-            String preview = buildDownloadedPreview(track, matchingTrack, state.path("part"));
-            return new DownloadResult(file, preview);
-        } catch (IOException ex) {
-            throw new IllegalStateException(ex.getMessage(), ex);
-        }
+    private static String buildPreview(TrackItem track) {
+        return buildTabDisplay(track, track.prettyTabJson());
     }
 
-    private static String fetchSongHtml(int songId) throws IOException {
-        try {
-            HttpRequest request = HttpRequest.newBuilder(URI.create(SONGSTERR_SONG_ENDPOINT + songId))
-                    .header("User-Agent", "NoteDetectTest/1.0 (+https://github.com)")
-                    .header("Accept", "text/html")
-                    .GET()
-                    .build();
-            HttpResponse<String> response = HTTP_CLIENT.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
-            if (response.statusCode() != 200) {
-                throw new IOException("Songsterr view endpoint returned HTTP " + response.statusCode());
-            }
-            return response.body();
-        } catch (InterruptedException ex) {
-            Thread.currentThread().interrupt();
-            throw new IOException("Interrupted while downloading Songsterr page.", ex);
-        }
-    }
-
-    private static JsonNode extractStateJson(String html) throws JsonProcessingException {
-        int marker = html.indexOf("<script id=\"state\"");
-        if (marker == -1) {
-            throw new JsonProcessingException("Unable to locate Songsterr state payload.") {};
-        }
-        int start = html.indexOf('>', marker);
-        int end = html.indexOf("</script>", start);
-        if (start == -1 || end == -1) {
-            throw new JsonProcessingException("Malformed Songsterr state script.") {};
-        }
-        String jsonPayload = html.substring(start + 1, end);
-        return MAPPER.readTree(jsonPayload);
-    }
-
-    private static JsonNode findTrackNode(JsonNode tracksNode, String hash) {
-        if (tracksNode == null || !tracksNode.isArray()) return null;
-        for (JsonNode node : tracksNode) {
-            if (Objects.equals(node.path("hash").asText(), hash)) {
-                return node;
-            }
-        }
-        return null;
-    }
-
-    private static String buildDownloadedPreview(TrackItem track, JsonNode trackNode, JsonNode partNode) {
+    private static String buildTabDisplay(TrackItem track, String prettyJson) {
         StringBuilder sb = new StringBuilder();
-        sb.append("Song: ").append(track.title()).append(" - ").append(track.artist()).append('\n');
-        sb.append("Track: ").append(track.name()).append(" (").append(track.instrument()).append(")\n");
-        sb.append("Hash: ").append(track.hash()).append('\n');
-        sb.append("Difficulty: ").append(trackNode.path("difficulty").isMissingNode() ? "N/A" : trackNode.path("difficulty").asInt()).append('\n');
-        sb.append("Views: ").append(trackNode.path("views").isMissingNode() ? "N/A" : trackNode.path("views").asInt()).append('\n');
-        sb.append("Tuning: ").append(formatTuning(track.tuning())).append('\n');
-        sb.append('\n');
-
-        JsonNode linesNode = partNode.path("lines").path("lines");
-        if (linesNode.isArray() && linesNode.size() > 0) {
-            sb.append("Tab Lines Preview (first line):\n");
-            JsonNode firstLine = linesNode.get(0);
-            JsonNode bars = firstLine.path("bars");
-            for (int i = 0; i < Math.min(4, bars.size()); i++) {
-                sb.append(bars.get(i).toString()).append('\n');
-            }
-            if (bars.size() > 4) {
-                sb.append("... ").append(bars.size() - 4).append(" more bars\n");
-            }
-        } else {
-            sb.append("Tab notation not contained in this response. Songsterr loads detailed tab lines lazily.\n");
-            sb.append("Metadata saved for offline experimentation.\n");
+        sb.append(buildTrackMetadata(track));
+        if (prettyJson != null && !prettyJson.isEmpty()) {
+            sb.append("\n\nTab JSON:\n").append(prettyJson);
         }
-
         return sb.toString();
     }
 
-    private static String buildPreview(TrackItem track) {
+    private static String buildTrackMetadata(TrackItem track) {
         StringBuilder sb = new StringBuilder();
         sb.append("Song: ").append(track.title()).append(" - ").append(track.artist()).append('\n');
         sb.append("Track: ").append(track.name()).append(" (").append(track.instrument()).append(")\n");
+        if (track.partId() >= 0) {
+            sb.append("Songsterr Part ID: ").append(track.partId()).append('\n');
+        }
+        sb.append("Search Index: ").append(track.index() + 1).append('\n');
         sb.append("Hash: ").append(track.hash()).append('\n');
         sb.append("Difficulty: ").append(track.difficulty() < 0 ? "N/A" : track.difficulty()).append('\n');
         sb.append("Tuning: ").append(formatTuning(track.tuning())).append('\n');
-        track.downloadedFile().ifPresent(file -> sb.append("\nSaved file: ").append(file).append('\n'));
-        track.downloadedPreview().ifPresent(preview -> sb.append("\nPreview:\n").append(preview));
+        sb.append("URL: ").append(buildTrackUrl(track)).append('\n');
         return sb.toString();
+    }
+
+    private void openTrackInBrowser(TrackItem track) {
+        String url = buildTrackUrl(track);
+        System.out.println("[Songsterr][open] " + url);
+        if (!Desktop.isDesktopSupported()) {
+            setStatus("Desktop browsing not supported. Open manually: " + url, true);
+            return;
+        }
+        Desktop desktop = Desktop.getDesktop();
+        if (!desktop.isSupported(Desktop.Action.BROWSE)) {
+            setStatus("Browse action not supported. URL: " + url, true);
+            return;
+        }
+        try {
+            desktop.browse(URI.create(url));
+            setStatus("Opening tab in browser...", false);
+        } catch (IOException ex) {
+            setStatus("Failed to open browser: " + ex.getMessage(), true);
+        }
+    }
+
+    private static String buildTrackUrl(TrackItem track) {
+        return buildSongUrl(track.artist(), track.title(), track.songId());
+    }
+
+    private static String prettifyJson(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return raw;
+        }
+        try {
+            JsonNode node = MAPPER.readTree(raw);
+            return MAPPER.writerWithDefaultPrettyPrinter().writeValueAsString(node);
+        } catch (Exception ex) {
+            return raw;
+        }
+    }
+
+    private static String buildSongUrl(String artist, String title, int songId) {
+        String artistSlug = slugify(artist);
+        String titleSlug = slugify(title);
+        return SONGSTERR_VIEW_BASE + artistSlug + "-" + titleSlug + "-tab-s" + songId;
     }
 
     private void setStatus(String message, boolean error) {
@@ -357,19 +473,18 @@ public class TabPrototypeController {
         };
     }
 
-    private static String buildFilename(SongItem song, TrackItem track) {
-        String safeTitle = sanitize(song.title());
-        String safeTrack = sanitize(track.name());
-        String timestamp = TIMESTAMP_FORMAT.format(LocalDateTime.now());
-        return safeTitle + "_" + safeTrack + "_" + timestamp + ".json";
-    }
-
-    private static String sanitize(String value) {
-        String sanitized = value.replaceAll("[^a-zA-Z0-9-_ ]", "").trim();
-        if (sanitized.isEmpty()) {
-            return "song";
+    private static JsonNode extractStateJson(String html) throws JsonProcessingException {
+        int marker = html.indexOf("<script id=\"state\"");
+        if (marker == -1) {
+            throw new JsonProcessingException("Unable to locate Songsterr state payload.") {};
         }
-        return sanitized.replace(' ', '_');
+        int start = html.indexOf('>', marker);
+        int end = html.indexOf("</script>", start);
+        if (start == -1 || end == -1) {
+            throw new JsonProcessingException("Malformed Songsterr state script.") {};
+        }
+        String jsonPayload = html.substring(start + 1, end);
+        return MAPPER.readTree(jsonPayload);
     }
 
     private static String formatTuning(List<Integer> tuning) {
@@ -384,6 +499,24 @@ public class TabPrototypeController {
         int note = (midi % 12 + 12) % 12;
         int octave = (midi / 12) - 1;
         return names[note] + octave;
+    }
+
+    private static String slugify(String value) {
+        if (value == null || value.isBlank()) {
+            return "song";
+        }
+        String normalized = Normalizer.normalize(value, Normalizer.Form.NFD)
+                .replaceAll("\\p{InCombiningDiacriticalMarks}+", "");
+        String slug = normalized.toLowerCase(Locale.ROOT)
+                .replaceAll("[^a-z0-9]+", "-")
+                .replaceAll("-{2,}", "-");
+        if (slug.startsWith("-")) {
+            slug = slug.substring(1);
+        }
+        if (slug.endsWith("-")) {
+            slug = slug.substring(0, slug.length() - 1);
+        }
+        return slug.isEmpty() ? "song" : slug;
     }
 
     private static Throwable unwrap(Throwable throwable) {
@@ -410,6 +543,32 @@ public class TabPrototypeController {
             Thread thread = new Thread(r, "songsterr-worker-" + idx++);
             thread.setDaemon(true);
             return thread;
+        }
+    }
+
+    private static class SongDetails {
+        private final int songId;
+        private final int revisionId;
+        private final Map<String, SongTrackInfo> tracksByHash;
+
+        SongDetails(int songId, int revisionId, Map<String, SongTrackInfo> tracksByHash) {
+            this.songId = songId;
+            this.revisionId = revisionId;
+            this.tracksByHash = tracksByHash;
+        }
+
+        SongTrackInfo trackForHash(String hash) {
+            return tracksByHash.get(hash);
+        }
+    }
+
+    private static class SongTrackInfo {
+        private final int partId;
+        private final int index;
+
+        SongTrackInfo(int partId, int index) {
+            this.partId = partId;
+            this.index = index;
         }
     }
 
@@ -451,19 +610,22 @@ public class TabPrototypeController {
         private final int songId;
         private final String artist;
         private final String title;
+        private final int index;
         private final String name;
         private final String instrument;
         private final String hash;
         private final int difficulty;
         private final List<Integer> tuning;
-        private Path downloadedFile;
-        private String downloadedPreview;
+        private int partId = -1;
+        private String tabJson;
+        private String prettyTabJson;
 
-        TrackItem(int songId, String artist, String title, String name, String instrument,
+        TrackItem(int songId, String artist, String title, int index, String name, String instrument,
                   String hash, int difficulty, List<Integer> tuning) {
             this.songId = songId;
             this.artist = artist;
             this.title = title;
+            this.index = index;
             this.name = name;
             this.instrument = instrument;
             this.hash = hash;
@@ -481,6 +643,14 @@ public class TabPrototypeController {
 
         String title() {
             return title;
+        }
+
+        int index() {
+            return index;
+        }
+
+        int partId() {
+            return partId;
         }
 
         String name() {
@@ -503,44 +673,25 @@ public class TabPrototypeController {
             return tuning;
         }
 
+        String prettyTabJson() {
+            return prettyTabJson;
+        }
+
+        void setSongMeta(int partId, int serverIndex) {
+            if (partId >= 0) {
+                this.partId = partId;
+            }
+        }
+
+        void setTabJson(String raw, String pretty) {
+            this.tabJson = raw;
+            this.prettyTabJson = pretty;
+        }
+
         String displayLabel() {
             String diff = difficulty >= 0 ? " (Difficulty " + difficulty + ")" : "";
-            return name + " — " + instrument + diff;
-        }
-
-        Optional<Path> downloadedFile() {
-            return Optional.ofNullable(downloadedFile);
-        }
-
-        Optional<String> downloadedPreview() {
-            return Optional.ofNullable(downloadedPreview);
-        }
-
-        void setDownloadedFile(Path file) {
-            this.downloadedFile = file;
-        }
-
-        void setDownloadedPreview(String preview) {
-            this.downloadedPreview = preview;
+            String part = partId >= 0 ? " (Part " + (partId + 1) + ")" : "";
+            return name + " — " + instrument + diff + part;
         }
     }
-
-    private static class DownloadResult {
-        private final Path file;
-        private final String preview;
-
-        DownloadResult(Path file, String preview) {
-            this.file = file;
-            this.preview = preview;
-        }
-
-        Path file() {
-            return file;
-        }
-
-        String preview() {
-            return preview;
-        }
-    }
-
 }

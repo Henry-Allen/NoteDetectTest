@@ -36,11 +36,6 @@
                         <ListView fx:id="songsList" prefHeight="220.0"/>
                         <Label text="Tracks"/>
                         <ListView fx:id="tracksList" prefHeight="220.0"/>
-                        <HBox spacing="8.0">
-                            <children>
-                                <Button fx:id="downloadButton" text="Download Selected" onAction="#onDownload" disable="true"/>
-                            </children>
-                        </HBox>
                     </children>
                     <padding>
                         <Insets top="8.0" right="16.0" bottom="16.0" left="16.0"/>
