@@ -22,6 +22,7 @@ import javafx.scene.canvas.GraphicsContext;
 import javafx.scene.paint.Color;
 
 import javax.sound.sampled.*;
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -77,6 +78,11 @@ public class PrimaryController {
     @FXML
     private void onRefreshDevices() {
         populateDevices();
+    }
+
+    @FXML
+    private void onOpenTabPrototype() throws IOException {
+        App.setRoot("tabprototype");
     }
 
     @FXML

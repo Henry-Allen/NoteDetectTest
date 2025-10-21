@@ -16,6 +16,12 @@
 
     <HBox spacing="8.0">
       <children>
+        <Button text="Open Tab Prototype" onAction="#onOpenTabPrototype" />
+      </children>
+    </HBox>
+
+    <HBox spacing="8.0">
+      <children>
         <Label text="Input Device:" />
         <ComboBox fx:id="deviceBox" prefWidth="360.0" />
         <Button fx:id="refreshButton" text="Refresh" onAction="#onRefreshDevices" />

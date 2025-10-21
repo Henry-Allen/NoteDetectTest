@@ -1,0 +1,71 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<?import javafx.geometry.Insets?>
+<?import javafx.scene.control.*?>
+<?import javafx.scene.layout.*?>
+
+<BorderPane xmlns="http://javafx.com/javafx" xmlns:fx="http://javafx.com/fxml/1"
+            fx:controller="org.openjfx.TabPrototypeController">
+    <top>
+        <VBox spacing="8.0" BorderPane.alignment="CENTER">
+            <children>
+                <HBox alignment="CENTER_LEFT" spacing="12.0">
+                    <children>
+                        <Button fx:id="backButton" text="Back to Detector" onAction="#switchToPrimary"/>
+                        <Label text="Songsterr Tab Prototype" styleClass="header-label"/>
+                    </children>
+                </HBox>
+                <HBox alignment="CENTER_LEFT" spacing="8.0">
+                    <children>
+                        <TextField fx:id="searchField" promptText="Search Songsterr (e.g. Enter Sandman)" HBox.hgrow="ALWAYS"/>
+                        <Button fx:id="searchButton" text="Search" onAction="#onSearch"/>
+                    </children>
+                </HBox>
+            </children>
+            <padding>
+                <Insets top="16.0" right="16.0" bottom="8.0" left="16.0"/>
+            </padding>
+        </VBox>
+    </top>
+    <center>
+        <SplitPane dividerPositions="0.38">
+            <items>
+                <VBox spacing="12.0" prefWidth="320.0">
+                    <children>
+                        <Label text="Songs"/>
+                        <ListView fx:id="songsList" prefHeight="220.0"/>
+                        <Label text="Tracks"/>
+                        <ListView fx:id="tracksList" prefHeight="220.0"/>
+                        <HBox spacing="8.0">
+                            <children>
+                                <Button fx:id="downloadButton" text="Download Selected" onAction="#onDownload" disable="true"/>
+                            </children>
+                        </HBox>
+                    </children>
+                    <padding>
+                        <Insets top="8.0" right="16.0" bottom="16.0" left="16.0"/>
+                    </padding>
+                </VBox>
+                <VBox spacing="10.0">
+                    <children>
+                        <Label text="Tab Preview"/>
+                        <TextArea fx:id="tabDisplay" editable="false" wrapText="true" prefRowCount="26"/>
+                    </children>
+                    <padding>
+                        <Insets top="8.0" right="16.0" bottom="16.0" left="0.0"/>
+                    </padding>
+                </VBox>
+            </items>
+        </SplitPane>
+    </center>
+    <bottom>
+        <HBox alignment="CENTER_LEFT">
+            <children>
+                <Label fx:id="statusLabel" text="Enter a search term to begin."/>
+            </children>
+            <padding>
+                <Insets top="8.0" right="16.0" bottom="16.0" left="16.0"/>
+            </padding>
+        </HBox>
+    </bottom>
+</BorderPane>
