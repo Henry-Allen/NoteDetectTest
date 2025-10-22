@@ -73,6 +73,7 @@ public class TabPrototypeController {
     @FXML private ListView<SongItem> songsList;
     @FXML private ListView<TrackItem> tracksList;
     @FXML private TextArea tabDisplay;
+    @FXML private Button openBrowserButton;
     @FXML private Label statusLabel;
 
     @FXML
@@ -81,6 +82,7 @@ public class TabPrototypeController {
         songsList.setCellFactory(simpleCell(SongItem::displayLabel));
         songsList.getSelectionModel().selectedItemProperty().addListener((obs, oldItem, newItem) -> {
             tracks.clear();
+            tracksList.getSelectionModel().clearSelection();
             tabDisplay.clear();
             if (newItem != null) {
                 activeSongId = newItem.songId();
@@ -105,12 +107,18 @@ public class TabPrototypeController {
             }
         });
 
+        if (openBrowserButton != null) {
+            openBrowserButton.setDisable(true);
+        }
+
         tracksList.setItems(tracks);
         tracksList.setCellFactory(simpleCell(TrackItem::displayLabel));
         tracksList.getSelectionModel().selectedItemProperty().addListener((obs, oldItem, newItem) -> {
+            if (openBrowserButton != null) {
+                openBrowserButton.setDisable(newItem == null);
+            }
             if (newItem != null) {
                 tabDisplay.setText(buildPreview(newItem));
-                openTrackInBrowser(newItem);
                 loadTrackJson(newItem);
             } else {
                 tabDisplay.clear();
@@ -164,7 +172,7 @@ public class TabPrototypeController {
 
         if (track.prettyTabJson() != null) {
             tabDisplay.setText(buildPreview(track));
-            setStatus("Loaded cached tab JSON.", false);
+            setStatus("Loaded cached tab JSON. Use \"Open in Browser\" to view the live version.", false);
             return;
         }
 
@@ -197,9 +205,19 @@ public class TabPrototypeController {
                         setStatus("Failed to scrape tab data: " + cause.getMessage(), true);
                     } else if (prettyJson != null) {
                         tabDisplay.setText(buildTabDisplay(track, prettyJson));
-                        setStatus("Loaded tab JSON from Songsterr.", false);
+                        setStatus("Loaded tab JSON. Use \"Open in Browser\" to view the live version.", false);
                     }
                 }));
+    }
+
+    @FXML
+    private void onOpenInBrowser() {
+        TrackItem track = tracksList.getSelectionModel().getSelectedItem();
+        if (track == null) {
+            setStatus("Select a track to open in your browser.", true);
+            return;
+        }
+        openTrackInBrowser(track);
     }
 
     private CompletableFuture<SongDetails> getSongDetails(SongItem song) {
@@ -437,7 +455,12 @@ public class TabPrototypeController {
     }
 
     private static String buildTrackUrl(TrackItem track) {
-        return buildSongUrl(track.artist(), track.title(), track.songId());
+        String base = buildSongUrl(track.artist(), track.title(), track.songId());
+        int trackIndex = track.index();
+        if (trackIndex >= 0) {
+            return base + "t" + trackIndex;
+        }
+        return base;
     }
 
     private static String prettifyJson(String raw) {

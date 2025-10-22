@@ -43,7 +43,12 @@
                 </VBox>
                 <VBox spacing="10.0">
                     <children>
-                        <Label text="Tab Preview"/>
+                        <HBox spacing="8.0" alignment="CENTER_LEFT">
+                            <children>
+                                <Label text="Tab Preview"/>
+                                <Button fx:id="openBrowserButton" text="Open in Browser" disable="true" onAction="#onOpenInBrowser"/>
+                            </children>
+                        </HBox>
                         <TextArea fx:id="tabDisplay" editable="false" wrapText="true" prefRowCount="26"/>
                     </children>
                     <padding>
